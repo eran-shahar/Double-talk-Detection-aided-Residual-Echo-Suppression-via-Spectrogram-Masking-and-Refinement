@@ -1,2 +1,2 @@
 a
-[elephant](/mic/1.wav)
+[elephant](mic/1.wav)
