@@ -1,1 +1,1 @@
-# Double-talk-Detection-aided-Residual-Echo-Suppression-via-Spectrogram-Masking-and-Refinement
+# Double-talk Detection-aided Residual Echo Suppression viavSpectrogram Masking and Refinement
