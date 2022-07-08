@@ -1,4 +1,4 @@
-from .modules import *
+from modules import *
 import torch.nn as nn
 import math
 
