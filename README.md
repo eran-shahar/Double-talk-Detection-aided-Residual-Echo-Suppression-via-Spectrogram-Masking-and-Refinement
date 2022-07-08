@@ -1,1 +1,2 @@
 # Double-talk Detection-aided Residual Echo Suppression viavSpectrogram Masking and Refinement
+This repository contains a PyTorch implementation of the deep-learning model architectures described in the paper "Double-talk Detection-aided Residual Echo Suppression viavSpectrogram Masking and Refinement" (yet to be published). In the paper we describe a two-stage approach to residual echo suppression in the low singal-to-echo ratio (SER) scenario. We also provide a few .WAV audio samples to demonestrate the proposed system's performance.
