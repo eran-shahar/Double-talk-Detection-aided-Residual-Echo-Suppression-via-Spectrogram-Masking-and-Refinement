@@ -1,52 +1,205 @@
-from masking_DTD import Masking_DTD
-from modules import *
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import math
+import numpy as np
+from models.complexnn import *
+import sys
 
 
-class Refinet(nn.Module):
-    def __init__(self, mask_model_path, in_channels=6, floors=2):
-        super(Refinet, self).__init__()
+class DownConvBlock(nn.Module):
 
-        self.in_channels = in_channels
+    def __init__(self, in_channels, out_channels, kernel_size, stride=(2, 2), inst_norm=True,
+                 activation='leaky_relu'):
+        super().__init__()
 
-        self.padder_unppader = Padder_Unpadder(floors)
+        self.conv = nn.Conv2d(in_channels=in_channels, out_channels=out_channels,
+                              kernel_size=(kernel_size, kernel_size), stride=stride,
+                              padding=(kernel_size//2, kernel_size//2))
+        self.inst_norm = nn.InstanceNorm2d(out_channels, affine=True)
 
-        self.mask_model = Masking_DTD().float()
-        self.mask_model.load_state_dict(torch.load(mask_model_path))
+        if activation == 'leaky_relu':
+            self.activation = nn.LeakyReLU()
+        else:
+            sys.exit('Activation function not supported')
 
-        for param in self.mask_model.parameters():
-            param.requires_grad = False
+        self.use_inst_norm = inst_norm
+
+    def forward(self, x):
+
+        out = self.conv(x)
+
+        if self.use_inst_norm:
+            out = self.inst_norm(out)
+
+        out = self.activation(out)
+
+        return out
 
 
-        self.layers = nn.Sequential(
+class UpConvBlock(nn.Module):
 
-            RefinementConvLayer(in_ch=in_channels, out_ch=64, kernel_size=3, stride=2),
-            RefinementConvLayer(in_ch=64, out_ch=128, kernel_size=3, stride=2),
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, inst_norm=True,
+                 activation='leaky_relu', do_upsample=True, upsample_factor=(2, 2)):
+        super().__init__()
 
-            ResidualLayer(in_ch=128, out_ch=128, kernel_size=3, stride=1),
-            ResidualLayer(in_ch=128, out_ch=128, kernel_size=3, stride=1),
-            ResidualLayer(in_ch=128, out_ch=128, kernel_size=3, stride=1),
-            ResidualLayer(in_ch=128, out_ch=128, kernel_size=3, stride=1),
-            ResidualLayer(in_ch=128, out_ch=128, kernel_size=3, stride=1),
+        self.do_upsample = do_upsample
 
-            RefinementDeconvLayer(in_ch=128, out_ch=64, kernel_size=3, stride=1),
-            RefinementDeconvLayer(in_ch=64, out_ch=32, kernel_size=3, stride=1),
+        self.upsample = nn.Upsample(scale_factor=upsample_factor, mode='nearest')
+        self.conv = nn.Conv2d(in_channels=in_channels, out_channels=out_channels,
+                              kernel_size=(kernel_size, kernel_size), stride=(stride, stride),
+                              padding=(kernel_size // 2, kernel_size // 2))
+        self.inst_norm = nn.InstanceNorm2d(out_channels, affine=True)
 
-            RefinementConvLayer(in_ch=32, out_ch=1, kernel_size=3, stride=1, inst_norm=False,
-                      activation='linear'))
+        if activation == 'leaky_relu':
+            self.activation = nn.LeakyReLU()
+        else:
+            sys.exit('Activation function not supported')
+
+        self.use_inst_norm = inst_norm
+
+    def forward(self, x, skip):
+
+        if self.do_upsample:
+            out = self.upsample(x)
+        else:
+            out = x
+
+        out = torch.cat([out, skip], 1)
+        out = self.conv(out)
+
+        if self.use_inst_norm:
+            out = self.inst_norm(out)
+
+        if not(self.activation is None):
+            out = self.activation(out)
+
+        return out
+
+
+class RefinementConvLayer(nn.Module):
+    def __init__(self, in_ch, out_ch, kernel_size, stride, inst_norm=True,
+                 pad='reflect', activation='elu'):
+        super(RefinementConvLayer, self).__init__()
+
+        self.use_inst_norm = inst_norm
+        self.inst_norm = nn.InstanceNorm2d(out_ch, affine=True)
+
+        self.pad = nn.ReflectionPad2d(kernel_size // 2)
+
+        self.conv_layer = nn.Conv2d(in_ch, out_ch, kernel_size=kernel_size,
+                                    stride=stride)
+
+        if activation == 'elu':
+            self.activation = nn.ELU()
+        elif activation == 'linear':
+            self.activation = None
+        else:
+            sys.exit('Activation function not supported')
 
 
     def forward(self, x):
 
-        self.mask_model.eval()
-        with torch.no_grad():
-            out_mask, out_up_dtd, _ = self.mask_model(x)
+        x = self.pad(x)
+        x = self.conv_layer(x)
 
-        in_refine = torch.cat([x, out_mask.unsqueeze(1), out_up_dtd.unsqueeze(1)], dim=1)
+        if self.use_inst_norm:
+            x = self.inst_norm(x)
 
-        in_refine = self.padder_unppader(in_refine, 'pad')
+        if not(self.activation is None):
+            x = self.activation(x)
 
-        out_refine = self.layers(in_refine)
+        return x
 
-        out_refine = self.padder_unppader(out_refine, 'unpad')
+class RefinementDeconvLayer(nn.Module):
+    def __init__(self, in_ch, out_ch, kernel_size, stride, activation='elu',
+                 inst_norm=True, upsample='nearest'):
+        super(RefinementDeconvLayer, self).__init__()
 
-        return out_refine.squeeze(1)
+        self.use_inst_norm = inst_norm
+        self.inst_norm = nn.InstanceNorm2d(out_ch, affine=True)
+
+        self.upsample = upsample
+
+        self.pad = nn.ReflectionPad2d(kernel_size // 2)
+
+        self.conv = nn.Conv2d(in_ch, out_ch, kernel_size, stride)
+
+        if activation == 'elu':
+            self.activation = nn.ELU()
+        else:
+            sys.exit('Activation function not supported')
+
+    def forward(self, x):
+
+        x = nn.functional.interpolate(x, scale_factor=2, mode=self.upsample)
+
+        x = self.pad(x)
+        x = self.conv(x)
+
+        if self.use_inst_norm:
+            x = self.inst_norm(x)
+
+        x = self.activation(x)
+
+        return x
+
+
+
+class ResidualLayer(nn.Module):
+    def __init__(self, in_ch, out_ch, kernel_size, stride):
+        super(ResidualLayer, self).__init__()
+
+        self.conv1 = RefinementConvLayer(in_ch, out_ch, kernel_size, stride, activation='elu')
+        self.conv2 = RefinementConvLayer(out_ch, out_ch, kernel_size, stride, activation='elu')
+
+    def forward(self, x):
+
+        y = self.conv1(x)
+
+        return self.conv2(y) + x
+
+
+
+class Padder_Unpadder(nn.Module):
+
+    def __init__(self, num_floors, freq_only=False):
+        super().__init__()
+
+        self.divisor = 2**num_floors
+        self.vals_arr = [self.divisor*i for i in range(1, 100)]
+
+        self.freq_only = freq_only
+
+        self.row_pad = 0
+        self.col_pad = 0
+
+    def forward(self, x, mode):
+
+        if mode == 'pad':
+
+            x_rows, x_cols = x.shape[2], x.shape[3]
+
+            new_rows = min([i for i in self.vals_arr if i >= x_rows])
+            new_cols = min([i for i in self.vals_arr if i >= x_cols])
+
+            if self.freq_only:
+                x = torch.nn.functional.pad(x, (0, 0, 0, new_rows - x_rows))
+            else:
+                x = torch.nn.functional.pad(x, (0, 0, 0, new_rows - x_rows))
+                x = torch.nn.functional.pad(x, (0, new_cols - x_cols))
+
+            self.row_pad = new_rows - x_rows
+            self.col_pad = new_cols - x_cols
+
+        elif mode == 'unpad':
+
+            if self.row_pad > 0:
+                x = x[:, :, :-self.row_pad, :]
+            if self.col_pad > 0 and not(self.freq_only):
+                x = x[:, :, :, :-self.col_pad]
+
+        return x
+
+
+
