@@ -78,7 +78,7 @@ class UpConvBlock(nn.Module):
 
 class RefinementConvLayer(nn.Module):
     def __init__(self, in_ch, out_ch, kernel_size, stride, inst_norm=True,
-                 pad='reflect', activation='elu'):
+                 activation='elu'):
         super(RefinementConvLayer, self).__init__()
 
         self.use_inst_norm = inst_norm
